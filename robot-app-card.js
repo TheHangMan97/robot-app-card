@@ -1,12 +1,12 @@
 /*!
- * Robot App Card v1.1.1
+ * Robot App Card v1.1.2
  * Saugroboter-Karte im Stil der Dreame- und Roborock-App für Home Assistant
  * - erkennt alle Entitäten des Roboters automatisch (über das Gerät)
  * - Karte mit Raumauswahl (Reihenfolge wie in der App), Zonen ziehen, ganzes Haus
  * - Saugstufe, Wassermenge, Modus, Route, Durchgänge, Wartung, Station
  * Unterstützt: Tasshack/dreame-vacuum, Roborock (Core) + Roborock Custom Map
  */
-const RAC_VERSION = "1.1.1";
+const RAC_VERSION = "1.1.2";
 
 const RAC_THEMES = {
   dreame: {
@@ -267,6 +267,15 @@ class RobotAppCard extends HTMLElement {
     try { return this._hass.formatEntityAttributeValue ? this._hass.formatEntityAttributeValue(s, "fan_speed", v) : v; } catch (_) { return v; }
   }
   _num(id) { const v = parseFloat(this._st(id)?.state); return Number.isFinite(v) ? v : null; }
+  /* Zahl mit der Anzeige-Genauigkeit aus HA (sonst maxDigits Nachkommastellen) formatieren */
+  _numFmt(id, maxDigits) {
+    const v = this._num(id);
+    if (v === null) return "–";
+    const p = this._hass.entities?.[id]?.display_precision;
+    const lang = this._hass.locale?.language || this._hass.language || "de";
+    const o = Number.isInteger(p) ? { minimumFractionDigits: p, maximumFractionDigits: p } : { maximumFractionDigits: maxDigits };
+    try { return v.toLocaleString(lang, o); } catch (_) { return String(+v.toFixed(o.maximumFractionDigits)); }
+  }
   _short(id) {
     const s = this._st(id); if (!s) return id;
     let n = s.attributes.friendly_name || id;
@@ -358,8 +367,8 @@ class RobotAppCard extends HTMLElement {
 
   _stats() {
     const d = this._disc, out = [];
-    if (d.area) out.push([this._num(d.area) ?? "–", this._st(d.area)?.attributes?.unit_of_measurement || "m²", "Fläche"]);
-    if (d.time) out.push([this._num(d.time) ?? "–", this._st(d.time)?.attributes?.unit_of_measurement || "min", "Dauer"]);
+    if (d.area) out.push([this._numFmt(d.area, 1), this._st(d.area)?.attributes?.unit_of_measurement || "m²", "Fläche"]);
+    if (d.time) out.push([this._numFmt(d.time, 0), this._st(d.time)?.attributes?.unit_of_measurement || "min", "Dauer"]);
     const b = this._num(d.battery);
     if (b !== null) out.push([Math.round(b), "%", "Akku"]);
     return out.map(([v, u, l]) => `<div class="stat"><div class="sv">${racEsc(v)}<small>${racEsc(u)}</small></div><div class="sl">${l}</div></div>`).join("");
