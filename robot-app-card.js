@@ -1,12 +1,12 @@
 /*!
- * Robot App Card v1.1.0
+ * Robot App Card v1.1.1
  * Saugroboter-Karte im Stil der Dreame- und Roborock-App für Home Assistant
  * - erkennt alle Entitäten des Roboters automatisch (über das Gerät)
  * - Karte mit Raumauswahl (Reihenfolge wie in der App), Zonen ziehen, ganzes Haus
  * - Saugstufe, Wassermenge, Modus, Route, Durchgänge, Wartung, Station
  * Unterstützt: Tasshack/dreame-vacuum, Roborock (Core) + Roborock Custom Map
  */
-const RAC_VERSION = "1.1.0";
+const RAC_VERSION = "1.1.1";
 
 const RAC_THEMES = {
   dreame: {
@@ -140,8 +140,17 @@ class RobotAppCard extends HTMLElement {
 
     const own = Object.keys(h.states).filter((id) =>
       id !== vac && (devId ? reg[id]?.device_id === devId : id.split(".")[1].startsWith(objId)));
+    // Entitäts-IDs sind je nach HA-Sprache übersetzt (z. B. select.roby_wischintensitat).
+    // Der translation_key ist sprachunabhängig -> daraus eine "englische" Ersatz-ID bauen und beide prüfen.
+    const alias = {};
+    own.forEach((id) => {
+      const tk = reg[id]?.translation_key;
+      alias[id] = tk ? [id, `${id.split(".")[0]}.${objId}_${tk}`] : [id];
+    });
+    const al = (id) => alias[id] || [id];
+    const hit = (id, re, not) => al(id).some((x) => re.test(x)) && !(not && al(id).some((x) => not.test(x)));
     const dom = (d) => own.filter((id) => id.startsWith(d + "."));
-    const find = (d, re, not) => dom(d).find((id) => re.test(id) && !(not && not.test(id))) || null;
+    const find = (d, re, not) => dom(d).find((id) => hit(id, re, not)) || null;
 
     // Karte
     let map = cfg.map_entity || null;
@@ -165,22 +174,40 @@ class RobotAppCard extends HTMLElement {
     }
 
     const consumableRe = /(main_brush|side_brush|filter|sensor_dirty|sensor_time|dirty_sensor|mop_pad|mop_left|mop_time|strainer|dust_bag|detergent|silver_ion|squeegee|cleaning_brush|scale_inhibitor)/;
-    const consumables = dom("sensor").filter((id) => consumableRe.test(id) && !/total|reset|history/.test(id));
-    const resetBtns = dom("button").filter((id) => /reset/.test(id));
-    const dockBtns = dom("button").filter((id) => !/reset|restart|reboot|identify|update/.test(id));
+    const consumables = dom("sensor").filter((id) => hit(id, consumableRe, /total|reset|history/));
+    const resetBtns = dom("button").filter((id) => hit(id, /reset|zurucksetzen/));
+    const dockBtns = dom("button").filter((id) => !hit(id, /reset|zurucksetzen|restart|reboot|neustart|identify|update/));
+    // Verbrauchsteil -> passender Reset-Button
+    const kind = (id) => {
+      for (const x of al(id)) {
+        const m = x.match(consumableRe);
+        if (m) return m[1].replace(/^(sensor_dirty|dirty_sensor|sensor_time)$/, "sensor").replace(/^(mop_left|mop_time)$/, "mop");
+      }
+      return null;
+    };
+    const resetFor = {};
+    consumables.forEach((id) => {
+      const k = kind(id);
+      let b = k && resetBtns.find((r) => al(r).some((x) => x.includes(k)));
+      if (!b) {
+        const key = id.split(".")[1].replace(/_(left|time_left|remaining)$/, "").split("_").slice(-2).join("_");
+        b = resetBtns.find((r) => r.includes(key));
+      }
+      if (b) resetFor[id] = b;
+    });
 
     this._disc = {
       _key: key, _cfg: cfg, platform, devName, map,
       battery: cfg.battery_entity || dom("sensor").find((id) => h.states[id]?.attributes?.device_class === "battery") || find("sensor", /battery/),
       status: cfg.status_entity || find("sensor", /_status$/) || find("sensor", /_state$/, /charging_state|dock/),
-      area: find("sensor", /(cleaned_area|cleaning_area|clean_area)$/, /total/),
-      time: find("sensor", /(cleaning_time|clean_time|cleaning_duration)$/, /total/),
-      suction: find("select", /(suction_level|suction|fan_speed|fan_power)/),
-      water: find("select", /(water_volume|mop_intensity|mop_pad_humidity|water_level|water_flow|scrub_intensity|mop_humidity)/),
-      cmode: find("select", /(cleaning_mode|clean_mode)$/),
-      route: find("select", /(mop_mode|mop_route|cleaning_route|route)$/),
-      mapSel: find("select", /(selected_map|current_map|map_select)/),
-      consumables, resetBtns, dockBtns,
+      area: find("sensor", /(cleaned_area|cleaning_area|clean_area|reinigungsflache)$/, /total|gesamt/),
+      time: find("sensor", /(cleaning_time|clean_time|cleaning_duration|reinigungszeit|reinigungsdauer)$/, /total|gesamt/),
+      suction: find("select", /(suction_level|suction|fan_speed|fan_power|saugleistung|saugstarke)/),
+      water: find("select", /(water_volume|mop_intensity|mop_pad_humidity|water_level|water_flow|scrub_intensity|mop_humidity|wischintensitat|wassermenge)/),
+      cmode: find("select", /(cleaning_mode|clean_mode|reinigungsmodus)$/),
+      route: find("select", /(mop_mode|mop_route|cleaning_route|route|wischmodus|wischroute)$/),
+      mapSel: find("select", /(selected_map|current_map|map_select|ausgewahlte_karte|aktuelle_karte)/),
+      consumables, resetBtns, dockBtns, resetFor,
     };
   }
 
@@ -398,15 +425,30 @@ class RobotAppCard extends HTMLElement {
     const fs = 12.5 * px;
     let out = "";
     if (cal && this._ui.mode !== "zone") {
-      const rooms = this._rooms();
-      rooms.forEach((r) => {
-        if (r.cx === null) return;
+      const h = fs * 1.9, gap = fs * 0.3, H = this._ih;
+      const labels = this._rooms().filter((r) => r.cx !== null).map((r) => {
         const [x, y] = cal.toMap(r.cx, r.cy);
         const idx = this._ui.selected.indexOf(r.id);
+        const w = Math.max(this._textW(r.name, fs) + fs * (idx >= 0 ? 2.6 : 1.4), fs * 3);
+        return { r, x, y, w, idx };
+      });
+      // Beschriftungen, die sich überdecken, vertikal auseinanderschieben
+      for (let pass = 0; pass < 6; pass++) {
+        let moved = false;
+        labels.forEach((a, i) => labels.slice(0, i).forEach((b) => {
+          if (Math.abs(a.x - b.x) >= (a.w + b.w) / 2 + gap || Math.abs(a.y - b.y) >= h + gap) return;
+          const dir = a.y >= b.y ? 1 : -1, need = (h + gap - Math.abs(a.y - b.y)) / 2;
+          a.y += dir * need; b.y -= dir * need; moved = true;
+        }));
+        labels.forEach((l) => {
+          l.x = Math.min(Math.max(l.x, l.w / 2), W - l.w / 2);
+          l.y = Math.min(Math.max(l.y, h / 2), H - h / 2);
+        });
+        if (!moved) break;
+      }
+      labels.forEach(({ r, x, y, w, idx }) => {
         const on = idx >= 0;
         const label = r.name;
-        const w = Math.max(label.length * fs * 0.56 + fs * (on ? 2.6 : 1.4), fs * 3);
-        const h = fs * 1.9;
         const roomMode = this._ui.mode === "rooms";
         out += `<g class="room ${on ? "on" : ""} ${roomMode ? "click" : "ghost"}" ${roomMode ? `data-action="room" data-id="${racEsc(r.id)}"` : ""} transform="translate(${x},${y})">
           <rect x="${-w / 2}" y="${-h / 2}" width="${w}" height="${h}" rx="${h / 2}"/>
@@ -428,11 +470,20 @@ class RobotAppCard extends HTMLElement {
     return out;
   }
 
+  _textW(t, fs) {
+    if (!this._canvas) {
+      this._canvas = document.createElement("canvas").getContext("2d");
+      this._font = getComputedStyle(this.$(".rac")).fontFamily || "sans-serif";
+    }
+    this._canvas.font = `600 ${fs}px ${this._font}`;
+    return this._canvas.measureText(String(t)).width * 1.04;
+  }
+
   /* ---------- Dreame-Layout ---------- */
   _segmented() {
     const m = this._ui.mode;
     const it = [["all", "Ganzes Haus", "mdi:home-outline"], ["rooms", "Räume", "mdi:floor-plan"], ["zone", "Zone", "mdi:selection-drag"]];
-    return `<div class="seg">${it.map(([k, l, i]) => `<button class="${m === k ? "on" : ""}" data-action="mode" data-mode="${k}"><ha-icon icon="${i}"></ha-icon>${l}</button>`).join("")}</div>`;
+    return `<div class="seg">${it.map(([k, l, i]) => `<button class="${m === k ? "on" : ""}" data-action="mode" data-mode="${k}"><ha-icon icon="${i}"></ha-icon><span>${l}</span></button>`).join("")}</div>`;
   }
 
   _hint() {
@@ -458,19 +509,22 @@ class RobotAppCard extends HTMLElement {
 
   _modeTiles() {
     const id = this._disc.cmode, s = this._st(id);
-    if (!s) return "";
+    if (!this._ok(id)) return "";
     const opts = s.attributes.options || [];
     return `<div class="modes">${opts.map((o) => `<button class="${s.state === o ? "on" : ""}" data-action="select" data-entity="${id}" data-option="${racEsc(o)}">
       <ha-icon icon="${RAC_MODE_ICONS[o] || "mdi:robot-vacuum"}"></ha-icon><span>${racEsc(this._fmtOpt(id, o))}</span></button>`).join("")}</div>`;
   }
 
+  _ok(id) { const s = this._st(id); return !!s && !["unavailable", "unknown"].includes(s.state); }
+  _waterLabel() { return this._style() === "roborock" ? "Wischintensität" : "Wassermenge"; }
+
   _settingItems() {
     const d = this._disc, out = [];
     const vac = this._st(this._config.entity);
-    if (d.suction) out.push(["mdi:fan", "Saugleistung", this._fmt(d.suction)]);
+    if (this._ok(d.suction)) out.push(["mdi:fan", "Saugleistung", this._fmt(d.suction)]);
     else if (vac?.attributes?.fan_speed_list) out.push(["mdi:fan", "Saugleistung", this._fmtFan(vac.attributes.fan_speed)]);
-    if (d.water) out.push(["mdi:water-outline", "Wassermenge", this._fmt(d.water)]);
-    if (d.route) out.push(["mdi:vector-polyline", "Route", this._fmt(d.route)]);
+    if (this._ok(d.water)) out.push(["mdi:water-outline", this._waterLabel(), this._fmt(d.water)]);
+    if (this._ok(d.route)) out.push(["mdi:vector-polyline", "Route", this._fmt(d.route)]);
     out.push(["mdi:repeat", "Durchgänge", `${this._ui.repeats}×`]);
     return out;
   }
@@ -522,7 +576,7 @@ class RobotAppCard extends HTMLElement {
       ${this._segmented()}
       ${this._hint()}
       ${modeTiles ? `<div class="sect">Reinigungsmodus</div>${modeTiles}` : ""}
-      <div class="cards" style="grid-template-columns:repeat(${Math.min(set.length, 4)},minmax(0,1fr))">
+      <div class="cards" style="grid-template-columns:repeat(${set.length === 4 ? 2 : Math.min(set.length, 3)},minmax(0,1fr))">
         ${set.map(([i, l, v]) => `<button class="mc" data-action="sheet" data-sheet="settings"><ha-icon icon="${i}"></ha-icon><div class="mcv">${racEsc(v)}</div><div class="mcl">${l}</div></button>`).join("")}
       </div>
       <div class="rr-bar">
@@ -546,11 +600,11 @@ class RobotAppCard extends HTMLElement {
     if (s === "settings") {
       title = "Reinigungseinstellungen";
       const vac = this._st(this._config.entity);
-      if (d.suction) { const x = this._st(d.suction); body += `<div class="grp"><div class="gl"><ha-icon icon="mdi:fan"></ha-icon>Saugleistung</div>${this._pills(d.suction, x.attributes.options || [], x.state, "select", (o) => this._fmtOpt(d.suction, o))}</div>`; }
+      if (this._ok(d.suction)) { const x = this._st(d.suction); body += `<div class="grp"><div class="gl"><ha-icon icon="mdi:fan"></ha-icon>Saugleistung</div>${this._pills(d.suction, x.attributes.options || [], x.state, "select", (o) => this._fmtOpt(d.suction, o))}</div>`; }
       else if (vac?.attributes?.fan_speed_list) body += `<div class="grp"><div class="gl"><ha-icon icon="mdi:fan"></ha-icon>Saugleistung</div>${this._pills(this._config.entity, vac.attributes.fan_speed_list, vac.attributes.fan_speed, "fan", (o) => this._fmtFan(o))}</div>`;
-      if (d.water) { const x = this._st(d.water); body += `<div class="grp"><div class="gl"><ha-icon icon="mdi:water-outline"></ha-icon>Wassermenge</div>${this._pills(d.water, x.attributes.options || [], x.state, "select", (o) => this._fmtOpt(d.water, o))}</div>`; }
-      if (d.cmode) { const x = this._st(d.cmode); body += `<div class="grp"><div class="gl"><ha-icon icon="mdi:broom"></ha-icon>Reinigungsmodus</div>${this._pills(d.cmode, x.attributes.options || [], x.state, "select", (o) => this._fmtOpt(d.cmode, o))}</div>`; }
-      if (d.route) { const x = this._st(d.route); body += `<div class="grp"><div class="gl"><ha-icon icon="mdi:vector-polyline"></ha-icon>Route</div>${this._pills(d.route, x.attributes.options || [], x.state, "select", (o) => this._fmtOpt(d.route, o))}</div>`; }
+      if (this._ok(d.water)) { const x = this._st(d.water); body += `<div class="grp"><div class="gl"><ha-icon icon="mdi:water-outline"></ha-icon>${this._waterLabel()}</div>${this._pills(d.water, x.attributes.options || [], x.state, "select", (o) => this._fmtOpt(d.water, o))}</div>`; }
+      if (this._ok(d.cmode)) { const x = this._st(d.cmode); body += `<div class="grp"><div class="gl"><ha-icon icon="mdi:broom"></ha-icon>Reinigungsmodus</div>${this._pills(d.cmode, x.attributes.options || [], x.state, "select", (o) => this._fmtOpt(d.cmode, o))}</div>`; }
+      if (this._ok(d.route)) { const x = this._st(d.route); body += `<div class="grp"><div class="gl"><ha-icon icon="mdi:vector-polyline"></ha-icon>Route</div>${this._pills(d.route, x.attributes.options || [], x.state, "select", (o) => this._fmtOpt(d.route, o))}</div>`; }
       body += `<div class="grp"><div class="gl"><ha-icon icon="mdi:repeat"></ha-icon>Durchgänge (Räume & Zonen)</div>${this._pills("", ["1", "2", "3"], String(this._ui.repeats), "repeats", (o) => o + "×")}</div>`;
     } else if (s === "maps") {
       title = "Karte wählen";
@@ -576,8 +630,7 @@ class RobotAppCard extends HTMLElement {
         const v = parseFloat(st.state);
         const pct = unit === "%" && Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : null;
         const low = pct !== null ? pct < 15 : false;
-        const key = id.split(".")[1].replace(/_(left|time_left|remaining)$/, "").split("_").slice(-2).join("_");
-        const reset = d.resetBtns.find((b) => b.includes(key));
+        const reset = d.resetFor[id];
         return `<div class="mrow">
           <div class="mi"><ha-icon icon="${st.attributes.icon || "mdi:cog-outline"}"></ha-icon></div>
           <div class="mm"><div class="mn">${racEsc(this._short(id))}</div>
@@ -725,19 +778,22 @@ class RobotAppCard extends HTMLElement {
     ha-icon { --mdc-icon-size:20px; display:inline-flex; }
 
     /* Kopf (Dreame) */
-    .hdr { display:flex; align-items:flex-start; justify-content:space-between; padding:4px 4px 12px; }
-    .nm { font-size:20px; font-weight:700; letter-spacing:-.2px; }
-    .stt { display:flex; align-items:center; gap:7px; color:var(--sub); font-size:14px; margin-top:3px; }
+    .hdr { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:4px 4px 12px; }
+    .hl { min-width:0; } .batt { flex:none; }
+    .nm { font-size:20px; font-weight:700; letter-spacing:-.2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .stt { display:flex; align-items:center; gap:7px; color:var(--sub); font-size:14px; margin-top:3px; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .dot { flex:none; }
     .dot { width:8px; height:8px; border-radius:50%; background:var(--sub); }
     .dot.ok { background:var(--ok); } .dot.run { background:var(--accent); box-shadow:0 0 0 4px var(--accentSoft); }
     .dot.err { background:var(--err); } .dot.warn { background:var(--warn); }
     .batt { display:inline-flex; align-items:center; gap:4px; font-weight:600; font-size:14px; }
     .batt ha-icon { --mdc-icon-size:20px; color:var(--ok); }
     .stats { display:flex; gap:8px; margin-bottom:12px; }
-    .stat { flex:1; background:var(--surface); border-radius:16px; padding:10px 12px; }
+    .stat { flex:1; min-width:0; background:var(--surface); border-radius:16px; padding:10px 12px; }
     .sv { font-size:20px; font-weight:700; letter-spacing:-.3px; }
     .sv small { font-size:12px; font-weight:500; color:var(--sub); margin-left:3px; }
-    .sl { font-size:12px; color:var(--sub); margin-top:2px; }
+    .sl { font-size:12px; color:var(--sub); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .sv { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 
     /* Karte */
     .mapwrap { position:relative; background:var(--mapBg); border-radius:20px; overflow:hidden; }
@@ -765,8 +821,9 @@ class RobotAppCard extends HTMLElement {
     /* Steuerung */
     .seg { display:flex; background:var(--surface); border-radius:16px; padding:4px; margin-top:12px; gap:4px; }
     .seg button { flex:1; min-width:0; white-space:nowrap; display:flex; align-items:center; justify-content:center; gap:6px; padding:10px 6px; border-radius:12px;
-      font-size:14px; font-weight:600; color:var(--sub); transition:all .15s; }
+      font-size:14px; font-weight:600; color:var(--sub); transition:all .15s; overflow:hidden; text-overflow:ellipsis; }
     .seg button ha-icon { display:none; }
+    .seg button span { min-width:0; overflow:hidden; text-overflow:ellipsis; }
     .seg button.on { background:var(--primary); color:var(--primaryText); }
     .hint { font-size:13px; color:var(--sub); padding:10px 6px 0; text-align:center; }
     .hint a { color:var(--accent); font-weight:600; cursor:pointer; margin-left:6px; }
@@ -782,14 +839,15 @@ class RobotAppCard extends HTMLElement {
     .modes button.on { color:var(--accent); border-color:var(--accent); background:var(--accentSoft); }
     .setrow { display:flex; align-items:center; width:100%; gap:4px; background:var(--surface); border-radius:16px; padding:12px; margin-top:12px; text-align:left; }
     .si { flex:1; display:flex; align-items:center; gap:8px; min-width:0; }
-    .si ha-icon { color:var(--sub); --mdc-icon-size:18px; }
-    .sil { font-size:11.5px; color:var(--sub); } .siv { font-size:14px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .chev { color:var(--sub); }
+    .si ha-icon { color:var(--sub); --mdc-icon-size:18px; flex:none; }
+    .si > div { min-width:0; flex:1; }
+    .sil { font-size:11.5px; color:var(--sub); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; } .siv { font-size:14px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .chev { color:var(--sub); flex:none; }
     .actions { display:flex; align-items:center; gap:12px; margin-top:16px; }
     .round { display:flex; flex-direction:column; align-items:center; gap:4px; font-size:11.5px; color:var(--sub); width:56px; }
     .round .ri { width:48px; height:48px; border-radius:50%; background:var(--surface); display:grid; place-items:center; color:var(--text); }
     .round .ri ha-icon { --mdc-icon-size:22px; }
-    .primary { flex:1; height:54px; border-radius:27px; background:var(--primary); color:var(--primaryText); font-size:16px; font-weight:700;
+    .primary { flex:1; min-width:0; white-space:nowrap; overflow:hidden; height:54px; border-radius:27px; background:var(--primary); color:var(--primaryText); font-size:16px; font-weight:700;
       display:flex; align-items:center; justify-content:center; gap:8px; }
     .stopline { display:flex; align-items:center; justify-content:center; gap:6px; width:100%; margin-top:10px; padding:8px; color:var(--err); font-size:14px; font-weight:600; }
 
@@ -798,7 +856,8 @@ class RobotAppCard extends HTMLElement {
     .roborock .mapwrap { border-radius:0; padding:74px 12px 84px; }
     .roborock .mapbox { max-height:66vh; }
     .roborock .controls { padding:0 16px 16px; }
-    .rr-hdr { position:absolute; left:12px; right:12px; top:12px; display:flex; justify-content:space-between; align-items:flex-start; pointer-events:none; }
+    .rr-hdr { position:absolute; left:12px; right:12px; top:12px; display:flex; justify-content:space-between; align-items:flex-start; gap:10px; pointer-events:none; }
+    .rr-hdr .glass { min-width:0; } .rr-hdr .glass.b { flex:none; }
     .glass { background:color-mix(in srgb, var(--surface) 86%, transparent); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
       border-radius:16px; padding:9px 12px; box-shadow:0 4px 16px rgba(0,0,0,.08); }
     .rr-hdr .nm { font-size:17px; } .rr-hdr .stt { font-size:13px; }
@@ -813,9 +872,10 @@ class RobotAppCard extends HTMLElement {
     .cards { display:grid; gap:8px; margin-top:12px; }
     .mc { background:var(--surface); border-radius:16px; padding:12px 10px; min-width:0; text-align:left; display:flex; flex-direction:column; gap:2px; }
     .mc ha-icon { color:var(--accent); --mdc-icon-size:22px; margin-bottom:6px; }
-    .mcv { font-size:14px; font-weight:700; line-height:1.2; overflow-wrap:break-word; hyphens:auto; -webkit-hyphens:auto; } .mcl { font-size:11.5px; color:var(--sub); }
+    .mcv { font-size:14px; font-weight:700; line-height:1.2; overflow-wrap:anywhere; hyphens:auto; -webkit-hyphens:auto; }
+    .mcl { font-size:11.5px; color:var(--sub); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .rr-bar { display:flex; justify-content:space-around; align-items:flex-end; margin-top:18px; }
-    .rb { display:flex; flex-direction:column; align-items:center; gap:6px; font-size:12px; color:var(--sub); font-weight:600; max-width:40%; }
+    .rb { display:flex; flex-direction:column; align-items:center; gap:6px; font-size:12px; color:var(--sub); font-weight:600; max-width:40%; text-align:center; }
     .rb .ri { width:52px; height:52px; border-radius:50%; background:var(--surface); display:grid; place-items:center; color:var(--text); }
     .rb .ri ha-icon { --mdc-icon-size:24px; }
     .rb.big .ri { width:72px; height:72px; background:var(--primary); color:var(--primaryText); box-shadow:0 8px 22px var(--accentSoft); }
@@ -838,7 +898,7 @@ class RobotAppCard extends HTMLElement {
     .pills button { padding:9px 14px; border-radius:999px; background:var(--chip); font-size:14px; font-weight:500; }
     .pills button.on { background:var(--accent); color:#fff; font-weight:600; }
     .tiles { display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); gap:10px; padding:6px 0; }
-    .tiles button { display:flex; flex-direction:column; align-items:center; gap:8px; padding:14px 6px; border-radius:16px; background:var(--chip); font-size:12.5px; font-weight:600; text-align:center; }
+    .tiles button { display:flex; flex-direction:column; align-items:center; gap:8px; padding:14px 6px; border-radius:16px; background:var(--chip); font-size:12.5px; font-weight:600; text-align:center; min-width:0; overflow-wrap:anywhere; hyphens:auto; -webkit-hyphens:auto; }
     .tiles ha-icon { --mdc-icon-size:26px; color:var(--accent); }
     .maint { display:flex; flex-direction:column; }
     .mrow { display:flex; align-items:center; gap:12px; padding:10px 0; border-bottom:1px solid var(--line); }
