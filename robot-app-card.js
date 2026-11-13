@@ -1,12 +1,12 @@
 /*!
- * Robot App Card v1.0.0
+ * Robot App Card v1.1.0
  * Saugroboter-Karte im Stil der Dreame- und Roborock-App für Home Assistant
  * - erkennt alle Entitäten des Roboters automatisch (über das Gerät)
  * - Karte mit Raumauswahl (Reihenfolge wie in der App), Zonen ziehen, ganzes Haus
  * - Saugstufe, Wassermenge, Modus, Route, Durchgänge, Wartung, Station
  * Unterstützt: Tasshack/dreame-vacuum, Roborock (Core) + Roborock Custom Map
  */
-const RAC_VERSION = "1.0.0";
+const RAC_VERSION = "1.1.0";
 
 const RAC_THEMES = {
   dreame: {
@@ -91,6 +91,11 @@ function racRooms(raw, mapName) {
 }
 
 class RobotAppCard extends HTMLElement {
+  static async getConfigElement() {
+    await racLoadHaForm();
+    return document.createElement("robot-app-card-editor");
+  }
+
   static getStubConfig(hass) {
     const v = Object.keys(hass?.states || {}).find((e) => e.startsWith("vacuum."));
     return { entity: v || "vacuum.robot", style: "dreame" };
@@ -856,6 +861,141 @@ class RobotAppCard extends HTMLElement {
 }
 
 if (!customElements.get("robot-app-card")) customElements.define("robot-app-card", RobotAppCard);
+
+/* ---------- Visueller Editor (Standard-HA-Einstellungsmenü via ha-form) ---------- */
+async function racLoadHaForm() {
+  if (customElements.get("ha-form") && customElements.get("ha-entity-picker")) return;
+  try {
+    // ha-form + Selektoren werden von HA erst bei Bedarf geladen -> über den Editor einer Standardkarte nachladen
+    const helpers = await window.loadCardHelpers?.();
+    const card = await helpers?.createCardElement({ type: "entities", entities: [] });
+    await card?.constructor?.getConfigElement?.();
+  } catch (_) { /* ältere/neuere HA-Versionen: ha-form ist meist schon geladen */ }
+}
+
+const RAC_LABELS = {
+  entity: "Saugroboter", name: "Titel", style: "Layout", dark: "Dunkelmodus", accent: "Akzentfarbe",
+  map_entity: "Karten-Entität", battery_entity: "Akku-Sensor", status_entity: "Status-Sensor",
+  hide_rooms: "Ausgeblendete Räume", room_names: "Raumnamen",
+};
+const RAC_HELPERS = {
+  name: "Leer lassen für den Gerätenamen",
+  style: "Automatisch = nach Integration (Roborock oder Dreame)",
+  accent: "Hex-Farbe, z. B. #2b6cff – leer lassen für die Layout-Farbe",
+  map_entity: "Leer lassen für automatische Erkennung (Kamera/Bild mit Kalibrierung)",
+  battery_entity: "Leer lassen für automatische Erkennung",
+  status_entity: "Leer lassen für automatische Erkennung",
+  hide_rooms: "Diese Räume erscheinen nicht auf der Karte",
+};
+
+class RobotAppCardEditor extends HTMLElement {
+  setConfig(config) {
+    this._config = config || {};
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
+
+  /* Räume über die Erkennungslogik der Karte ermitteln (ohne Umbenennung/Ausblendung) */
+  _detectRooms() {
+    const cfg = this._config, h = this._hass;
+    if (!cfg.entity || !String(cfg.entity).startsWith("vacuum.") || !h?.states?.[cfg.entity]) return [];
+    try {
+      const probe = document.createElement("robot-app-card");
+      probe._hass = h;
+      probe._config = { ...cfg, room_names: {}, hide_rooms: [] };
+      probe._discover();
+      return probe._rooms().map((r) => ({ id: String(r.id), name: r.name }));
+    } catch (_) { return []; }
+  }
+
+  _schema(rooms) {
+    const opts = (o) => ({ select: { mode: "dropdown", options: o.map(([value, label]) => ({ value, label })) } });
+    const roomSchema = rooms.length
+      ? [
+          { name: "hide_rooms", selector: { select: { multiple: true, mode: "list",
+            options: rooms.map((r) => ({ value: r.id, label: `${r.name} (${r.id})` })) } } },
+          { type: "expandable", name: "room_names", title: "Raumnamen", icon: "mdi:rename",
+            schema: rooms.map((r) => ({ name: r.id, label: `Raum ${r.id}`, helper: `Erkannt: ${r.name}`, selector: { text: {} } })) },
+        ]
+      : [
+          { name: "hide_rooms", selector: { select: { multiple: true, custom_value: true, options: [] } } },
+          { name: "room_names", selector: { object: {} } },
+        ];
+    return [
+      { name: "entity", required: true, selector: { entity: { domain: "vacuum" } } },
+      { name: "name", selector: { text: {} } },
+      { type: "expandable", name: "", flatten: true, title: "Darstellung", icon: "mdi:palette", schema: [
+        { type: "grid", name: "", schema: [
+          { name: "style", selector: opts([["auto", "Automatisch"], ["dreame", "Dreame"], ["roborock", "Roborock"]]) },
+          { name: "dark", selector: opts([["auto", "Wie HA-Theme"], ["false", "Hell"], ["true", "Dunkel"]]) },
+        ] },
+        { name: "accent", selector: { text: {} } },
+      ] },
+      { type: "expandable", name: "", flatten: true, title: "Räume", icon: "mdi:floor-plan", schema: roomSchema },
+      { type: "expandable", name: "", flatten: true, title: "Entitäten (optional)", icon: "mdi:tune-variant", schema: [
+        { name: "map_entity", selector: { entity: { domain: ["camera", "image"] } } },
+        { name: "battery_entity", selector: { entity: { domain: "sensor", device_class: "battery" } } },
+        { name: "status_entity", selector: { entity: { domain: "sensor" } } },
+      ] },
+    ];
+  }
+
+  _render() {
+    if (!this._hass || !this._config) return;
+    if (!this._form) {
+      this._form = document.createElement("ha-form");
+      this._form.computeLabel = (s) => s.label || RAC_LABELS[s.name] || s.name;
+      this._form.computeHelper = (s) => s.helper || RAC_HELPERS[s.name];
+      this._form.addEventListener("value-changed", (e) => this._changed(e));
+      this.appendChild(this._form);
+    }
+    const rooms = this._detectRooms();
+    const key = JSON.stringify(rooms);
+    if (key !== this._roomKey) { this._roomKey = key; this._form.schema = this._schema(rooms); }
+
+    const c = this._config;
+    this._form.hass = this._hass;
+    this._form.data = {
+      ...c,
+      style: c.style || "auto",
+      dark: c.dark === undefined || c.dark === null ? "auto" : String(c.dark),
+      hide_rooms: (c.hide_rooms || []).map(String),
+      room_names: rooms.length ? Object.fromEntries(Object.entries(c.room_names || {}).map(([k, v]) => [String(k), v])) : c.room_names,
+    };
+  }
+
+  _changed(ev) {
+    ev.stopPropagation();
+    const v = { ...ev.detail.value };
+    const num = (x) => (/^\d+$/.test(String(x)) ? Number(x) : x);
+
+    if (v.style === "auto") delete v.style;
+    if (v.dark === "auto") delete v.dark;
+    else if (v.dark === "true" || v.dark === "false") v.dark = v.dark === "true";
+    if (Array.isArray(v.hide_rooms)) v.hide_rooms = v.hide_rooms.map(num);
+    if (v.room_names && typeof v.room_names === "object") {
+      const rn = {};
+      Object.entries(v.room_names).forEach(([k, n]) => { if (n !== undefined && n !== null && String(n).trim() !== "") rn[num(k)] = n; });
+      v.room_names = rn;
+    }
+    Object.keys(v).forEach((k) => {
+      const x = v[k];
+      if (x === undefined || x === null || x === "" || (Array.isArray(x) && !x.length) ||
+        (x && typeof x === "object" && !Array.isArray(x) && !Object.keys(x).length)) delete v[k];
+    });
+
+    const config = { type: this._config.type || "custom:robot-app-card", ...v };
+    this._config = config;
+    this.dispatchEvent(new CustomEvent("config-changed", { bubbles: true, composed: true, detail: { config } }));
+  }
+}
+
+if (!customElements.get("robot-app-card-editor")) customElements.define("robot-app-card-editor", RobotAppCardEditor);
+
 window.customCards = window.customCards || [];
 if (!window.customCards.some((c) => c.type === "robot-app-card")) {
   window.customCards.push({ type: "robot-app-card", name: "Robot App Card", description: "Saugroboter im Dreame-/Roborock-App-Stil", preview: true });
