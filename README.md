@@ -29,13 +29,13 @@ Lovelace-Karte für Saugroboter im Stil der Hersteller-Apps – für **Dreame** 
 
 ```yaml
 type: custom:robot-app-card
-entity: vacuum.dreamebot_l10s_pro
+entity: vacuum.dreame_l10s_pro
 style: dreame
 ```
 
 ```yaml
 type: custom:robot-app-card
-entity: vacuum.roby
+entity: vacuum.roborock_s8
 style: roborock
 room_names:
   16: Wohnzimmer
