@@ -27,6 +27,8 @@ Lovelace-Karte für Saugroboter im Stil der Hersteller-Apps – für **Dreame** 
 
 ## Konfiguration
 
+Die Karte hat einen **visuellen Editor** im normalen Home-Assistant-Einstellungsmenü: Dashboard bearbeiten → Karte hinzufügen → „Robot App Card“. Dort lassen sich Roboter, Layout, Dunkelmodus, Akzentfarbe, Raumnamen, ausgeblendete Räume und optionale Entitäten einstellen – die erkannten Räume werden direkt aufgelistet. Alternativ geht alles weiterhin per YAML:
+
 ```yaml
 type: custom:robot-app-card
 entity: vacuum.dreame_l10s_pro
