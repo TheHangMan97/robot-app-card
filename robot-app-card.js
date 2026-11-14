@@ -1,12 +1,12 @@
 /*!
- * Robot App Card v1.1.2
+ * Robot App Card v1.1.3
  * Saugroboter-Karte im Stil der Dreame- und Roborock-App für Home Assistant
  * - erkennt alle Entitäten des Roboters automatisch (über das Gerät)
  * - Karte mit Raumauswahl (Reihenfolge wie in der App), Zonen ziehen, ganzes Haus
  * - Saugstufe, Wassermenge, Modus, Route, Durchgänge, Wartung, Station
  * Unterstützt: Tasshack/dreame-vacuum, Roborock (Core) + Roborock Custom Map
  */
-const RAC_VERSION = "1.1.2";
+const RAC_VERSION = "1.1.3";
 
 const RAC_THEMES = {
   dreame: {
@@ -206,6 +206,7 @@ class RobotAppCard extends HTMLElement {
       water: find("select", /(water_volume|mop_intensity|mop_pad_humidity|water_level|water_flow|scrub_intensity|mop_humidity|wischintensitat|wassermenge)/),
       cmode: find("select", /(cleaning_mode|clean_mode|reinigungsmodus)$/),
       route: find("select", /(mop_mode|mop_route|cleaning_route|route|wischmodus|wischroute)$/),
+      cleaning: find("binary_sensor", /(_in_cleaning|_cleaning|reinigt|reinigung)$/, /self|auto|carpet|teppich|mop|selbst/),
       mapSel: find("select", /(selected_map|current_map|map_select|ausgewahlte_karte|aktuelle_karte)/),
       consumables, resetBtns, dockBtns, resetFor,
     };
@@ -268,12 +269,12 @@ class RobotAppCard extends HTMLElement {
   }
   _num(id) { const v = parseFloat(this._st(id)?.state); return Number.isFinite(v) ? v : null; }
   /* Zahl mit der Anzeige-Genauigkeit aus HA (sonst maxDigits Nachkommastellen) formatieren */
-  _numFmt(id, maxDigits) {
+  _numFmt(id, maxDigits, cap) {
     const v = this._num(id);
     if (v === null) return "–";
     const p = this._hass.entities?.[id]?.display_precision;
     const lang = this._hass.locale?.language || this._hass.language || "de";
-    const o = Number.isInteger(p) ? { minimumFractionDigits: p, maximumFractionDigits: p } : { maximumFractionDigits: maxDigits };
+    const o = Number.isInteger(p) && !(cap && p > maxDigits) ? { minimumFractionDigits: p, maximumFractionDigits: p } : { maximumFractionDigits: maxDigits };
     try { return v.toLocaleString(lang, o); } catch (_) { return String(+v.toFixed(o.maximumFractionDigits)); }
   }
   _short(id) {
@@ -295,7 +296,24 @@ class RobotAppCard extends HTMLElement {
     return /roborock|xiaomi_miio/.test(this._disc?.platform || "") ? "roborock" : "dreame";
   }
   _vacState() { return this._st(this._config.entity)?.state || "unavailable"; }
-  _active() { return ["cleaning", "returning"].includes(this._vacState()); }
+  /* Reinigungsphase: run | paused | idle | off
+     Der vacuum-Zustand allein reicht nicht – z. B. zeigt Roborock beim Moppwaschen/Nachladen
+     mitten in der Reinigung "docked", obwohl der Auftrag noch läuft. */
+  _phase() {
+    const st = this._vacState();
+    if (st === "unavailable") return "off";
+    if (st === "cleaning" || st === "returning") return "run";
+    if (st === "paused") return "paused";
+    const a = this._st(this._config.entity)?.attributes || {};
+    if (a.cleaning_paused === true || a.returning_paused === true) return "paused";
+    if (a.running === true || a.started === true) return "run";
+    const raw = String(this._st(this._disc.status)?.state || "").toLowerCase();
+    if (/^(paused|cleaning_paused|returning_paused)$/.test(raw)) return "paused";
+    if (/^(cleaning|sweeping|mopping|sweeping_and_mopping|segment_cleaning|zoned_cleaning|spot_cleaning|room_cleaning|zone_cleaning|returning|returning_home|returning_to_wash|returning_to_drain|docking|going_to_target|washing_the_mop|going_to_wash_the_mop|washing_pause|second_cleaning)$/.test(raw)) return "run";
+    if (this._st(this._disc.cleaning)?.state === "on") return "run";
+    return "idle";
+  }
+  _active() { return this._phase() === "run"; }
   _mapName() { return this._st(this._disc.mapSel)?.state; }
 
   _rooms() {
@@ -323,7 +341,7 @@ class RobotAppCard extends HTMLElement {
   _update(force) {
     if (!this._hass || !this._root || !this._disc) return;
     const d = this._disc;
-    const ids = [this._config.entity, d.map, d.battery, d.status, d.area, d.time, d.suction, d.water, d.cmode,
+    const ids = [this._config.entity, d.map, d.battery, d.status, d.cleaning, d.area, d.time, d.suction, d.water, d.cmode,
       d.route, d.mapSel, ...d.consumables, ...d.dockBtns];
     const sig = JSON.stringify([ids.map((i) => { const s = this._st(i); return s ? [s.state, s.last_updated] : 0; }),
       this._ui, this._isDark(), this._iw, this._ih]);
@@ -346,13 +364,13 @@ class RobotAppCard extends HTMLElement {
   }
 
   _statusInfo() {
-    const st = this._vacState();
+    const st = this._vacState(), ph = this._phase();
     const txt = this._disc.status ? this._fmt(this._disc.status) : this._fmt(this._config.entity);
     let cls = "idle";
-    if (["cleaning", "returning"].includes(st)) cls = "run";
+    if (ph === "run") cls = "run";
     else if (st === "error") cls = "err";
     else if (st === "docked") cls = "ok";
-    else if (st === "paused") cls = "warn";
+    else if (ph === "paused") cls = "warn";
     return { txt, cls };
   }
 
@@ -368,7 +386,7 @@ class RobotAppCard extends HTMLElement {
   _stats() {
     const d = this._disc, out = [];
     if (d.area) out.push([this._numFmt(d.area, 1), this._st(d.area)?.attributes?.unit_of_measurement || "m²", "Fläche"]);
-    if (d.time) out.push([this._numFmt(d.time, 0), this._st(d.time)?.attributes?.unit_of_measurement || "min", "Dauer"]);
+    if (d.time) out.push([this._numFmt(d.time, 0, true), this._st(d.time)?.attributes?.unit_of_measurement || "min", "Dauer"]);
     const b = this._num(d.battery);
     if (b !== null) out.push([Math.round(b), "%", "Akku"]);
     return out.map(([v, u, l]) => `<div class="stat"><div class="sv">${racEsc(v)}<small>${racEsc(u)}</small></div><div class="sl">${l}</div></div>`).join("");
@@ -442,7 +460,7 @@ class RobotAppCard extends HTMLElement {
         return { r, x, y, w, idx };
       });
       // Beschriftungen, die sich überdecken, vertikal auseinanderschieben
-      for (let pass = 0; pass < 6; pass++) {
+      for (let pass = 0; pass < 40; pass++) {
         let moved = false;
         labels.forEach((a, i) => labels.slice(0, i).forEach((b) => {
           if (Math.abs(a.x - b.x) >= (a.w + b.w) / 2 + gap || Math.abs(a.y - b.y) >= h + gap) return;
@@ -539,10 +557,10 @@ class RobotAppCard extends HTMLElement {
   }
 
   _primaryLabel() {
-    const st = this._vacState();
-    if (st === "cleaning") return ["mdi:pause", "Pausieren"];
+    const st = this._vacState(), ph = this._phase();
     if (st === "returning") return ["mdi:pause", "Rückkehr stoppen"];
-    if (st === "paused") return ["mdi:play", "Fortsetzen"];
+    if (ph === "run") return ["mdi:pause", "Pausieren"];
+    if (ph === "paused") return ["mdi:play", "Fortsetzen"];
     const m = this._ui.mode;
     if (m === "rooms") { const n = this._ui.selected.length; return ["mdi:play", n ? `${n} ${n === 1 ? "Raum" : "Räume"} reinigen` : "Räume wählen"]; }
     if (m === "zone") { const n = this._ui.zones.length; return ["mdi:play", n ? `${n > 1 ? n + " Zonen" : "Zone"} reinigen` : "Zone aufziehen"]; }
@@ -550,8 +568,9 @@ class RobotAppCard extends HTMLElement {
   }
 
   _primaryDisabled() {
-    if (["cleaning", "returning", "paused"].includes(this._vacState())) return false;
-    if (this._vacState() === "unavailable") return true;
+    const ph = this._phase();
+    if (ph === "run" || ph === "paused") return false;
+    if (ph === "off") return true;
     if (this._ui.mode === "rooms") return !this._ui.selected.length;
     if (this._ui.mode === "zone") return !this._ui.zones.length;
     return false;
@@ -573,7 +592,7 @@ class RobotAppCard extends HTMLElement {
         <button class="primary" data-action="primary" ${this._primaryDisabled() ? "disabled" : ""}><ha-icon icon="${pi}"></ha-icon>${racEsc(pl)}</button>
         <button class="round" data-action="sheet" data-sheet="more" title="Mehr"><span class="ri"><ha-icon icon="mdi:dots-horizontal"></ha-icon></span><span>Mehr</span></button>
       </div>
-      ${this._active() || this._vacState() === "paused" ? `<button class="stopline" data-action="stop"><ha-icon icon="mdi:stop"></ha-icon>Reinigung beenden</button>` : ""}`;
+      ${this._active() || this._phase() === "paused" ? `<button class="stopline" data-action="stop"><ha-icon icon="mdi:stop"></ha-icon>Reinigung beenden</button>` : ""}`;
   }
 
   /* ---------- Roborock-Layout ---------- */
@@ -593,7 +612,7 @@ class RobotAppCard extends HTMLElement {
         <button class="rb big" data-action="primary" ${this._primaryDisabled() ? "disabled" : ""}><span class="ri"><ha-icon icon="${pi}"></ha-icon></span><span>${racEsc(pl)}</span></button>
         <button class="rb" data-action="sheet" data-sheet="more"><span class="ri"><ha-icon icon="mdi:dots-horizontal"></ha-icon></span><span>Mehr</span></button>
       </div>
-      ${this._active() || this._vacState() === "paused" ? `<button class="stopline" data-action="stop"><ha-icon icon="mdi:stop"></ha-icon>Reinigung beenden</button>` : ""}`;
+      ${this._active() || this._phase() === "paused" ? `<button class="stopline" data-action="stop"><ha-icon icon="mdi:stop"></ha-icon>Reinigung beenden</button>` : ""}`;
   }
 
   /* ---------- Bottom-Sheets ---------- */
@@ -708,10 +727,10 @@ class RobotAppCard extends HTMLElement {
   }
 
   _primary() {
-    const h = this._hass, vac = this._config.entity, st = this._vacState();
+    const h = this._hass, vac = this._config.entity, ph = this._phase();
     const plat = this._disc.platform, n = this._ui.repeats;
-    if (st === "cleaning" || st === "returning") { h.callService("vacuum", "pause", { entity_id: vac }); this._toast("Pausiert"); return; }
-    if (st === "paused") { h.callService("vacuum", "start", { entity_id: vac }); this._toast("Wird fortgesetzt"); return; }
+    if (ph === "run") { h.callService("vacuum", "pause", { entity_id: vac }); this._toast("Pausiert"); return; }
+    if (ph === "paused") { h.callService("vacuum", "start", { entity_id: vac }); this._toast("Wird fortgesetzt"); return; }
     const isDreame = /dreame/.test(plat);
     if (this._ui.mode === "rooms") {
       const seg = this._ui.selected;
@@ -808,7 +827,7 @@ class RobotAppCard extends HTMLElement {
     .mapwrap { position:relative; background:var(--mapBg); border-radius:20px; overflow:hidden; }
     .mapbox { position:relative; width:100%; aspect-ratio:1/1; max-height:62vh; margin:0 auto; }
     .mapimg { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; user-select:none; -webkit-user-drag:none; }
-    .ov { position:absolute; inset:0; width:100%; height:100%; touch-action:manipulation; }
+    .ov { position:absolute; inset:0; width:100%; height:100%; touch-action:manipulation; overflow:visible; }
     .ov.zone { touch-action:none; cursor:crosshair; }
     .nomap { display:none; position:absolute; inset:0; align-items:center; justify-content:center; color:var(--sub); font-size:14px; }
     .mapbox.empty .nomap { display:flex; } .mapbox.empty { aspect-ratio:16/10; }
