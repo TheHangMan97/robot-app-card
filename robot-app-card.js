@@ -1,12 +1,12 @@
 /*!
- * Robot App Card v1.1.3
+ * Robot App Card v1.1.4
  * Saugroboter-Karte im Stil der Dreame- und Roborock-App für Home Assistant
  * - erkennt alle Entitäten des Roboters automatisch (über das Gerät)
  * - Karte mit Raumauswahl (Reihenfolge wie in der App), Zonen ziehen, ganzes Haus
  * - Saugstufe, Wassermenge, Modus, Route, Durchgänge, Wartung, Station
  * Unterstützt: Tasshack/dreame-vacuum, Roborock (Core) + Roborock Custom Map
  */
-const RAC_VERSION = "1.1.3";
+const RAC_VERSION = "1.1.4";
 
 const RAC_THEMES = {
   dreame: {
@@ -633,7 +633,7 @@ class RobotAppCard extends HTMLElement {
       if (this._ok(d.water)) { const x = this._st(d.water); body += `<div class="grp"><div class="gl"><ha-icon icon="mdi:water-outline"></ha-icon>${this._waterLabel()}</div>${this._pills(d.water, x.attributes.options || [], x.state, "select", (o) => this._fmtOpt(d.water, o))}</div>`; }
       if (this._ok(d.cmode)) { const x = this._st(d.cmode); body += `<div class="grp"><div class="gl"><ha-icon icon="mdi:broom"></ha-icon>Reinigungsmodus</div>${this._pills(d.cmode, x.attributes.options || [], x.state, "select", (o) => this._fmtOpt(d.cmode, o))}</div>`; }
       if (this._ok(d.route)) { const x = this._st(d.route); body += `<div class="grp"><div class="gl"><ha-icon icon="mdi:vector-polyline"></ha-icon>Route</div>${this._pills(d.route, x.attributes.options || [], x.state, "select", (o) => this._fmtOpt(d.route, o))}</div>`; }
-      body += `<div class="grp"><div class="gl"><ha-icon icon="mdi:repeat"></ha-icon>Durchgänge (Räume & Zonen)</div>${this._pills("", ["1", "2", "3"], String(this._ui.repeats), "repeats", (o) => o + "×")}</div>`;
+      body += `<div class="grp"><div class="gl"><ha-icon icon="mdi:repeat"></ha-icon>Durchgänge</div>${this._pills("", ["1", "2", "3"], String(this._ui.repeats), "repeats", (o) => o + "×")}</div>`;
     } else if (s === "maps") {
       title = "Karte wählen";
       const x = this._st(d.mapSel);
@@ -732,11 +732,14 @@ class RobotAppCard extends HTMLElement {
     if (ph === "run") { h.callService("vacuum", "pause", { entity_id: vac }); this._toast("Pausiert"); return; }
     if (ph === "paused") { h.callService("vacuum", "start", { entity_id: vac }); this._toast("Wird fortgesetzt"); return; }
     const isDreame = /dreame/.test(plat);
-    if (this._ui.mode === "rooms") {
-      const seg = this._ui.selected;
+    const segClean = (seg) => {
       if (isDreame) h.callService("dreame_vacuum", "vacuum_clean_segment", { entity_id: vac, segments: seg, repeats: n });
       else h.callService("vacuum", "send_command", { entity_id: vac, command: "app_segment_clean", params: [{ segments: seg, repeat: n }] });
-      this._toast(`${seg.length} ${seg.length === 1 ? "Raum" : "Räume"} gestartet`);
+    };
+    if (this._ui.mode === "rooms") {
+      const seg = this._ui.selected;
+      segClean(seg);
+      this._toast(`${seg.length} ${seg.length === 1 ? "Raum" : "Räume"} gestartet${n > 1 ? ` · ${n}×` : ""}`);
       return;
     }
     if (this._ui.mode === "zone") {
@@ -747,11 +750,16 @@ class RobotAppCard extends HTMLElement {
       });
       if (isDreame) h.callService("dreame_vacuum", "vacuum_clean_zone", { entity_id: vac, zone: zones, repeats: n });
       else h.callService("vacuum", "send_command", { entity_id: vac, command: "app_zoned_clean", params: zones.map((z) => [...z, n]) });
-      this._toast("Zonenreinigung gestartet");
+      this._toast(`Zonenreinigung gestartet${n > 1 ? ` · ${n}×` : ""}`);
       return;
     }
+    // Ganzes Haus: vacuum.start kennt keine Durchgänge -> bei 2×/3× alle Räume als Raumreinigung schicken
+    if (n > 1) {
+      const seg = this._rooms().map((r) => r.id);
+      if (seg.length) { segClean(seg); this._toast(`Ganzes Haus · ${n}× gestartet`); return; }
+      this._toast("Keine Raumdaten – Reinigung mit 1× gestartet");
+    } else this._toast("Reinigung gestartet");
     h.callService("vacuum", "start", { entity_id: vac });
-    this._toast("Reinigung gestartet");
   }
 
   _svgPt(e) {
