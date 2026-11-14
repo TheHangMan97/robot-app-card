@@ -14,6 +14,7 @@ Lovelace-Karte für Saugroboter im Stil der Hersteller-Apps – für **Dreame** 
 - Saugleistung, Wassermenge, Reinigungsmodus, Route, Durchgänge (1–3×)
 - **Wartung** mit Restlaufzeit, Fortschrittsbalken und Zurücksetzen
 - **Station**-Aktionen (Absaugen, Mopp waschen/trocknen …), Kartenwechsel (EG/OG)
+- **Laufende Reinigung** bleibt sichtbar (Räume, Zonen, Durchgänge) – auch nach Neuladen; danach Standardansicht
 - Zwei Layouts: `dreame` und `roborock`, Hell/Dunkel folgt dem HA-Theme
 - **Automatische Erkennung** aller Entitäten über das Gerät – keine Sensornamen nötig
 

@@ -1,12 +1,12 @@
 /*!
- * Robot App Card v1.1.4
+ * Robot App Card v1.2.0
  * Saugroboter-Karte im Stil der Dreame- und Roborock-App für Home Assistant
  * - erkennt alle Entitäten des Roboters automatisch (über das Gerät)
  * - Karte mit Raumauswahl (Reihenfolge wie in der App), Zonen ziehen, ganzes Haus
  * - Saugstufe, Wassermenge, Modus, Route, Durchgänge, Wartung, Station
  * Unterstützt: Tasshack/dreame-vacuum, Roborock (Core) + Roborock Custom Map
  */
-const RAC_VERSION = "1.1.4";
+const RAC_VERSION = "1.2.0";
 
 const RAC_THEMES = {
   dreame: {
@@ -314,6 +314,60 @@ class RobotAppCard extends HTMLElement {
     return "idle";
   }
   _active() { return this._phase() === "run"; }
+
+  /* ---------- Laufender Auftrag ----------
+     Beim Start wird der Auftrag (Modus, Räume, Zonen, Durchgänge) im Browser gespeichert,
+     damit die Karte ihn während der Reinigung anzeigt – auch nach Neuaufbau/Neuladen.
+     Nach Ende der Reinigung wird er gelöscht und die Standardansicht gezeigt. */
+  _jobKey() { return `robot-app-card:job:${this._config.entity}`; }
+  _loadJob() {
+    try { const j = JSON.parse(localStorage.getItem(this._jobKey()) || "null"); return j && j.mode ? j : null; } catch (_) { return null; }
+  }
+  _saveJob(job) {
+    this._job = job;
+    try { job ? localStorage.setItem(this._jobKey(), JSON.stringify(job)) : localStorage.removeItem(this._jobKey()); } catch (_) { /* privat/gesperrt */ }
+  }
+  _jobFromRobot() {
+    // Reinigung wurde woanders gestartet (App, Automation): so viel wie möglich aus dem Roboter lesen
+    const raw = String(this._st(this._disc.status)?.state || "").toLowerCase();
+    const a = this._st(this._config.entity)?.attributes || {};
+    const segs = Array.isArray(a.active_segments) ? a.active_segments : Array.isArray(a.segments) ? a.segments : null;
+    if (/segment|room/.test(raw) || (segs && segs.length)) return { mode: "rooms", selected: (segs || []).map((x) => (/^\d+$/.test(String(x)) ? Number(x) : x)), zones: [], repeats: null, robot: true };
+    if (/zone/.test(raw)) return { mode: "zone", selected: [], zones: [], repeats: null, robot: true };
+    return { mode: "all", selected: [], zones: [], repeats: null, robot: true };
+  }
+  _syncJob() {
+    const ph = this._phase(), busy = ph === "run" || ph === "paused";
+    if (this._job === undefined) this._job = this._loadJob();
+    let job = this._job;
+    if (job && job.entity !== this._config.entity) { this._saveJob(null); job = null; }
+    if (busy) {
+      if (job && !job.seen) { job.seen = true; this._saveJob(job); }
+      // gespeicherter Auftrag älter als 24 h -> verwerfen
+      if (job && Date.now() - job.ts > 864e5) { this._saveJob(null); job = null; }
+      const show = job || this._jobFromRobot();
+      this._lock = show;
+      const ui = { mode: show.mode, selected: show.selected || [], zones: show.zones || [], repeats: show.repeats || this._ui.repeats };
+      if (JSON.stringify([ui.mode, ui.selected, ui.zones, ui.repeats]) !== JSON.stringify([this._ui.mode, this._ui.selected, this._ui.zones, this._ui.repeats])) {
+        this._ui = { ...this._ui, ...ui };
+      }
+      return;
+    }
+    if (job) {
+      // Gerade gestartet, HA meldet aber noch keine Reinigung -> bis zu 90 s weiter anzeigen
+      if (!job.seen && Date.now() - job.ts < 9e4) {
+        this._lock = job;
+        this._ui = { ...this._ui, mode: job.mode, selected: job.selected, zones: job.zones, repeats: job.repeats };
+        return;
+      }
+      this._saveJob(null);
+    }
+    if (this._lock) {
+      // Reinigung beendet -> Standardansicht
+      this._lock = null;
+      this._ui = { ...this._ui, mode: "all", selected: [], zones: [], repeats: 1, sheet: this._ui.sheet === "settings" ? null : this._ui.sheet };
+    }
+  }
   _mapName() { return this._st(this._disc.mapSel)?.state; }
 
   _rooms() {
@@ -340,11 +394,12 @@ class RobotAppCard extends HTMLElement {
   /* ------------------------------------------------------------------ */
   _update(force) {
     if (!this._hass || !this._root || !this._disc) return;
+    this._syncJob();
     const d = this._disc;
     const ids = [this._config.entity, d.map, d.battery, d.status, d.cleaning, d.area, d.time, d.suction, d.water, d.cmode,
       d.route, d.mapSel, ...d.consumables, ...d.dockBtns];
     const sig = JSON.stringify([ids.map((i) => { const s = this._st(i); return s ? [s.state, s.last_updated] : 0; }),
-      this._ui, this._isDark(), this._iw, this._ih]);
+      this._ui, this._lock, this._isDark(), this._iw, this._ih]);
     if (!force && sig === this._sig) return;
     this._sig = sig;
     if (this._drag) return;
@@ -510,11 +565,20 @@ class RobotAppCard extends HTMLElement {
   _segmented() {
     const m = this._ui.mode;
     const it = [["all", "Ganzes Haus", "mdi:home-outline"], ["rooms", "Räume", "mdi:floor-plan"], ["zone", "Zone", "mdi:selection-drag"]];
-    return `<div class="seg">${it.map(([k, l, i]) => `<button class="${m === k ? "on" : ""}" data-action="mode" data-mode="${k}"><ha-icon icon="${i}"></ha-icon><span>${l}</span></button>`).join("")}</div>`;
+    return `<div class="seg ${this._lock ? "locked" : ""}">${it.map(([k, l, i]) => `<button class="${m === k ? "on" : ""}" data-action="mode" data-mode="${k}"><ha-icon icon="${i}"></ha-icon><span>${l}</span></button>`).join("")}</div>`;
   }
 
   _hint() {
     const m = this._ui.mode;
+    if (this._lock) {
+      const L = this._lock, rep = L.repeats ? ` · ${L.repeats}×` : "";
+      let what = "Ganzes Haus";
+      if (m === "rooms") {
+        const names = this._rooms().filter((r) => this._ui.selected.includes(r.id)).sort((x, y) => this._ui.selected.indexOf(x.id) - this._ui.selected.indexOf(y.id)).map((r) => r.name);
+        what = names.length ? names.join(" → ") : "Raumreinigung";
+      } else if (m === "zone") what = this._ui.zones.length ? `${this._ui.zones.length} ${this._ui.zones.length === 1 ? "Zone" : "Zonen"}` : "Zonenreinigung";
+      return `<div class="hint run"><ha-icon icon="mdi:progress-clock"></ha-icon>Aktuelle Reinigung: <b>${racEsc(what)}${rep}</b></div>`;
+    }
     if (m === "rooms") {
       const n = this._ui.selected.length;
       const rooms = this._rooms();
@@ -561,6 +625,7 @@ class RobotAppCard extends HTMLElement {
     if (st === "returning") return ["mdi:pause", "Rückkehr stoppen"];
     if (ph === "run") return ["mdi:pause", "Pausieren"];
     if (ph === "paused") return ["mdi:play", "Fortsetzen"];
+    if (this._lock) return ["mdi:timer-sand", "Wird gestartet…"];
     const m = this._ui.mode;
     if (m === "rooms") { const n = this._ui.selected.length; return ["mdi:play", n ? `${n} ${n === 1 ? "Raum" : "Räume"} reinigen` : "Räume wählen"]; }
     if (m === "zone") { const n = this._ui.zones.length; return ["mdi:play", n ? `${n > 1 ? n + " Zonen" : "Zone"} reinigen` : "Zone aufziehen"]; }
@@ -570,7 +635,7 @@ class RobotAppCard extends HTMLElement {
   _primaryDisabled() {
     const ph = this._phase();
     if (ph === "run" || ph === "paused") return false;
-    if (ph === "off") return true;
+    if (ph === "off" || this._lock) return true;
     if (this._ui.mode === "rooms") return !this._ui.selected.length;
     if (this._ui.mode === "zone") return !this._ui.zones.length;
     return false;
@@ -689,6 +754,10 @@ class RobotAppCard extends HTMLElement {
     const el = e.composedPath().find((n) => n instanceof Element && n.dataset && n.dataset.action);
     if (!el || el.hasAttribute("disabled")) return;
     const a = el.dataset.action, h = this._hass, vac = this._config.entity;
+    if (this._lock && ["mode", "room", "clearsel", "zdel", "repeats"].includes(a)) {
+      this._toast("Während der Reinigung nicht änderbar");
+      return;
+    }
     switch (a) {
       case "mode": this._set({ mode: el.dataset.mode }); break;
       case "room": {
@@ -732,6 +801,8 @@ class RobotAppCard extends HTMLElement {
     if (ph === "run") { h.callService("vacuum", "pause", { entity_id: vac }); this._toast("Pausiert"); return; }
     if (ph === "paused") { h.callService("vacuum", "start", { entity_id: vac }); this._toast("Wird fortgesetzt"); return; }
     const isDreame = /dreame/.test(plat);
+    const remember = (mode, selected, zones) =>
+      this._saveJob({ entity: vac, mode, selected: [...selected], zones: zones.map((z) => [...z]), repeats: n, ts: Date.now(), seen: false });
     const segClean = (seg) => {
       if (isDreame) h.callService("dreame_vacuum", "vacuum_clean_segment", { entity_id: vac, segments: seg, repeats: n });
       else h.callService("vacuum", "send_command", { entity_id: vac, command: "app_segment_clean", params: [{ segments: seg, repeat: n }] });
@@ -739,6 +810,7 @@ class RobotAppCard extends HTMLElement {
     if (this._ui.mode === "rooms") {
       const seg = this._ui.selected;
       segClean(seg);
+      remember("rooms", seg, []);
       this._toast(`${seg.length} ${seg.length === 1 ? "Raum" : "Räume"} gestartet${n > 1 ? ` · ${n}×` : ""}`);
       return;
     }
@@ -750,16 +822,18 @@ class RobotAppCard extends HTMLElement {
       });
       if (isDreame) h.callService("dreame_vacuum", "vacuum_clean_zone", { entity_id: vac, zone: zones, repeats: n });
       else h.callService("vacuum", "send_command", { entity_id: vac, command: "app_zoned_clean", params: zones.map((z) => [...z, n]) });
+      remember("zone", [], this._ui.zones);
       this._toast(`Zonenreinigung gestartet${n > 1 ? ` · ${n}×` : ""}`);
       return;
     }
     // Ganzes Haus: vacuum.start kennt keine Durchgänge -> bei 2×/3× alle Räume als Raumreinigung schicken
     if (n > 1) {
       const seg = this._rooms().map((r) => r.id);
-      if (seg.length) { segClean(seg); this._toast(`Ganzes Haus · ${n}× gestartet`); return; }
+      if (seg.length) { segClean(seg); remember("all", [], []); this._toast(`Ganzes Haus · ${n}× gestartet`); return; }
       this._toast("Keine Raumdaten – Reinigung mit 1× gestartet");
     } else this._toast("Reinigung gestartet");
     h.callService("vacuum", "start", { entity_id: vac });
+    remember("all", [], []);
   }
 
   _svgPt(e) {
@@ -768,7 +842,7 @@ class RobotAppCard extends HTMLElement {
     return [Math.max(0, Math.min(this._iw, p.x)), Math.max(0, Math.min(this._ih, p.y))];
   }
   _zoneStart(e) {
-    if (this._ui.mode !== "zone" || !this._cal() || this._ui.zones.length >= 5) return;
+    if (this._lock || this._ui.mode !== "zone" || !this._cal() || this._ui.zones.length >= 5) return;
     if (e.composedPath().some((n) => n instanceof Element && n.dataset && n.dataset.action === "zdel")) return;
     const p = this._svgPt(e); if (!p) return;
     this._drag = { a: p, b: p };
@@ -863,6 +937,10 @@ class RobotAppCard extends HTMLElement {
     .seg button.on { background:var(--primary); color:var(--primaryText); }
     .hint { font-size:13px; color:var(--sub); padding:10px 6px 0; text-align:center; }
     .hint a { color:var(--accent); font-weight:600; cursor:pointer; margin-left:6px; }
+    .hint.run { display:flex; align-items:center; justify-content:center; gap:6px; flex-wrap:wrap; color:var(--text); }
+    .hint.run ha-icon { --mdc-icon-size:16px; color:var(--accent); }
+    .hint.run b { font-weight:700; color:var(--accent); }
+    .seg.locked button:not(.on) { opacity:.45; }
     .roomlist { display:flex; flex-wrap:wrap; gap:8px; padding-top:12px; }
     .roomlist button { display:flex; align-items:center; gap:6px; padding:8px 12px; border-radius:999px; background:var(--surface); font-size:14px; font-weight:500; }
     .roomlist button b { display:inline-grid; place-items:center; width:20px; height:20px; border-radius:50%; background:#fff; color:var(--accent); font-size:12px; }
